@@ -2,7 +2,7 @@ from openai import OpenAI
 import os
 
 # Use environment variable instead of hardcoding
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("MY_NEW_APP_KEY"))
 
 def convert_code(code: str, prompt: str):
     system_msg = (
@@ -19,3 +19,4 @@ def convert_code(code: str, prompt: str):
         ]
     )
     return response.choices[0].message.content
+
