@@ -1,8 +1,8 @@
-# converter.py
-import openai
+from openai import OpenAI
+import os
 
-# 🔹 Replace with your real OpenAI API key
-openai.api_key = "MY_NEW_APP_KEY"
+# Use environment variable instead of hardcoding
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def convert_code(code: str, prompt: str):
     system_msg = (
@@ -11,8 +11,7 @@ def convert_code(code: str, prompt: str):
     )
     user_msg = f"Legacy Code:\n{code}\n\nUser Prompt:\n{prompt}"
 
-    # Call OpenAI Chat API
-    response = openai.chat.completions.create(
+    response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": system_msg},
@@ -20,5 +19,3 @@ def convert_code(code: str, prompt: str):
         ]
     )
     return response.choices[0].message.content
-
-
