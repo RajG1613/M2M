@@ -1,8 +1,10 @@
 streamlit
-fastapi
 openai
 pandas
 numpy
 requests
 PyYAML
 python-dotenv
+fastapi
+uvicorn
+pydantic
