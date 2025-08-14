@@ -2,7 +2,7 @@
 import openai
 
 # 🔹 Replace with your real OpenAI API key
-openai.api_key = "YOUR_REAL_API_KEY"
+openai.api_key = "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"
 
 def convert_code(code: str, prompt: str):
     system_msg = (
@@ -20,3 +20,4 @@ def convert_code(code: str, prompt: str):
         ]
     )
     return response.choices[0].message.content
+
