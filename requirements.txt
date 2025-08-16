@@ -10,5 +10,6 @@ uvicorn
 pydantic
 python-multipart
 openai>=1.35.0
+groq
 
 
