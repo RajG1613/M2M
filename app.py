@@ -23,7 +23,7 @@ with st.sidebar:
         missing = not os.getenv("MY_NEW_APP_KEY")
     else:
         # Common fast Groq models; pick what you’ve enabled in your Groq console
-        model = st.selectbox("Model", ["llama-3.1-70b-versatile", "mixtral-8x7b-32768", "llama3-8b-8192"])
+        model = st.selectbox("Model", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
         key_hint = "🔐 Reads Groq key from env var **GROQ_API_KEY**"
         missing = not os.getenv("GROQ_API_KEY")
 
@@ -152,3 +152,4 @@ if run:
     with tab_usage:
         st.write("Token/provider usage reported by the API (if available).")
         st.json(usage or {"info": "No usage available from provider"})
+
