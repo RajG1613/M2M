@@ -1,8 +1,6 @@
 # converter.py
 import os
-import io
 import json
-import zipfile
 from typing import Dict, List, Any
 
 # OpenAI SDK (modern)
@@ -18,13 +16,19 @@ except Exception:
     Groq = None
 
 
-SYSTEM_PROMPT = """You are an expert in Mainframe Modernization.
-You will receive:
-- Parsed legacy code (COBOL/JCL/DB2/VSAM/CICS/IMS DB) with filename context
-- Target stack and user instructions
-- Requested artifacts to include
+SYSTEM_PROMPT = """
+You are an expert in Mainframe Modernization.
 
-RESPOND STRICTLY AS JSON with this schema:
+Special Rules:
+- If legacy type is JCL => ALWAYS convert to shell scripts (bash) or CI/CD YAML,
+  even if target stack is Spring Boot, FastAPI, etc.
+- COBOL => convert into the requested target stack (Spring/Java, FastAPI/Python, etc.)
+- DB2 => modern SQL/ORM
+- VSAM => relational/NoSQL schema + data access code
+- CICS => REST APIs (controller + service layer)
+- IMS DB => RDBMS schema + migration utilities
+
+Respond STRICTLY as JSON with this schema:
 {
   "files": [
     {"path": "relative/path/with/extension", "content": "file text"},
@@ -36,35 +40,37 @@ RESPOND STRICTLY AS JSON with this schema:
     "hints": "optional"
   }
 }
-
-Guidelines:
-- Always preserve original business logic while modernizing.
-- JCL ➝ Convert to shell scripts (bash) or modern CI/CD YAML.
-- DB2 ➝ Convert SQL to Postgres/MySQL or ORM equivalents.
-- VSAM ➝ Convert to relational tables or JSON/NoSQL.
-- CICS ➝ Convert to REST APIs (Spring Boot / FastAPI / .NET Web API).
-- IMS DB ➝ Convert to relational DB schemas + migration utilities.
-- Generate converted code **line by line, professionally formatted**.
-- Unit tests must be in a separate document under /tests.
-- If 'OpenAPI Spec' requested, include swagger/openapi file under /api.
-- If 'CI Pipeline (YAML)' requested, include a YAML pipeline file.
-- If 'Dockerfile' requested, include root-level Dockerfile.
-- If 'K8s Manifests' requested, include basic deployment/service YAML.
-- Always include comments where business logic is inferred.
 """
 
 
 def _stack_defaults(target_stack: str) -> Dict[str, str]:
     ts = target_stack.lower()
-    if "spring" in ts:
+    if "spring" in ts:  # Java/Spring Boot
         return {"main": "src/main/java/App.java", "test_dir": "src/test/java"}
-    if "fastapi" in ts:
+    if "fastapi" in ts:  # Python
         return {"main": "app/main.py", "test_dir": "tests"}
     if ".net" in ts or "c#" in ts:
         return {"main": "src/Program.cs", "test_dir": "tests"}
     if "node" in ts or "express" in ts:
         return {"main": "src/index.js", "test_dir": "__tests__"}
+    if "shell" in ts:  # For JCL → shell
+        return {"main": "scripts/job.sh", "test_dir": "tests"}
     return {"main": "src/output.txt", "test_dir": "tests"}
+
+
+def _detect_legacy_type(legacy_code: str) -> str:
+    code_upper = legacy_code.upper()
+    if code_upper.strip().startswith("//") or " JOB " in code_upper:
+        return "jcl"
+    if "PROCEDURE DIVISION" in code_upper:
+        return "cobol"
+    if "EXEC SQL" in code_upper:
+        return "db2"
+    if "CICS" in code_upper:
+        return "cics"
+    if "IMS" in code_upper:
+        return "ims"
+    return "unknown"
 
 
 def _call_openai(messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int) -> str:
@@ -108,17 +114,16 @@ def convert_to_bundle(
     temperature: float,
     max_tokens: int,
     provider: str = "OpenAI",
-    zip_output: bool = True,
 ) -> Dict[str, Any]:
     """
-    Returns dict:
-    {
-      "files": [{"path": "...", "content": "..."}, ...],
-      "notes_markdown": "...",
-      "usage": {"provider": "...", "model": "..."},
-      "zip_bytes": optional zip archive as bytes
-    }
+    Convert legacy code into modern artifacts.
     """
+    legacy_type = _detect_legacy_type(legacy_code)
+
+    # Override if JCL
+    if legacy_type == "jcl":
+        target_stack = "Shell Script"
+
     defaults = _stack_defaults(target_stack)
 
     user_payload = {
@@ -126,6 +131,7 @@ def convert_to_bundle(
         "instructions": instructions,
         "requested_artifacts": requested_artifacts,
         "parsed_legacy": legacy_code,
+        "legacy_type": legacy_type,
         "defaults": defaults,
     }
 
@@ -142,26 +148,34 @@ def convert_to_bundle(
     try:
         bundle = json.loads(content)
         if "files" not in bundle:
-            raise ValueError("No 'files' field in JSON")
+            raise ValueError("No 'files' in JSON")
     except Exception:
         bundle = {
             "files": [{"path": defaults["main"], "content": content}],
-            "notes_markdown": "Model returned non-JSON text. Wrapped into a single file.",
+            "notes_markdown": "⚠️ Model did not return JSON. Wrapped raw output.",
             "usage": {}
         }
 
-    # usage meta
     usage = bundle.get("usage", {})
     usage.update({"provider": provider, "model": model})
     bundle["usage"] = usage
-
-    # prepare zip if requested
-    if zip_output:
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in bundle["files"]:
-                zf.writestr(f["path"], f["content"])
-            zf.writestr("NOTES.md", bundle.get("notes_markdown", ""))
-        bundle["zip_bytes"] = zip_buffer.getvalue()
-
     return bundle
+
+
+# -------- Interactive Chatbot --------
+
+def chatbot(legacy_code: str, query: str, model: str, temperature: float = 0.2, max_tokens: int = 1000, provider: str = "OpenAI") -> str:
+    """
+    Interactive chatbot for modernization Q&A.
+    Example: explain COBOL logic, map DB2 to ORM, etc.
+    """
+    legacy_type = _detect_legacy_type(legacy_code)
+    messages = [
+        {"role": "system", "content": f"You are a modernization assistant. Legacy type = {legacy_type}."},
+        {"role": "user", "content": f"Legacy code:\n{legacy_code}\n\nUser question:\n{query}"}
+    ]
+
+    if provider.lower() == "groq":
+        return _call_groq(messages, model, temperature, max_tokens)
+    else:
+        return _call_openai(messages, model, temperature, max_tokens)
