@@ -2,6 +2,7 @@
 import io
 import os
 import time
+import difflib
 import zipfile
 import streamlit as st
 from typing import List, Dict
@@ -11,18 +12,18 @@ from parser import parse_code
 st.set_page_config(page_title="AI Mainframe Modernizer", page_icon="🚀", layout="wide")
 
 st.title("🚀 AI Mainframe Modernizer — Enterprise Demo")
-st.caption("Upload COBOL/JCL → get production-grade modern artifacts: code, tests, API spec, CI pipeline, Dockerfile & migration notes.")
+st.caption("Upload COBOL/JCL → get modern artifacts: code, tests, API spec, CI pipeline, Dockerfile & migration notes.")
 
+# ---------------- Sidebar ----------------
 with st.sidebar:
     st.header("⚙️ Settings")
-    provider = st.selectbox("Provider", ["OpenAI", "Groq"], help="Choose which LLM backend to use")
+    provider = st.selectbox("Provider", ["OpenAI", "Groq"])
 
     if provider == "OpenAI":
-        model = st.selectbox("Model", ["gpt-4o", "gpt-4o-mini"], help="4o = higher quality, 4o-mini = cheaper/faster")
+        model = st.selectbox("Model", ["gpt-4o", "gpt-4o-mini"])
         key_hint = "🔐 Reads OpenAI key from env var **MY_NEW_APP_KEY**"
         missing = not os.getenv("MY_NEW_APP_KEY")
     else:
-        # Common fast Groq models; pick what you’ve enabled in your Groq console
         model = st.selectbox("Model", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
         key_hint = "🔐 Reads Groq key from env var **GROQ_API_KEY**"
         missing = not os.getenv("GROQ_API_KEY")
@@ -33,7 +34,13 @@ with st.sidebar:
     st.divider()
     target_stack = st.selectbox(
         "Target stack",
-        ["Java (Spring Boot)", "Python (FastAPI)", "C# (.NET)", "Node.js (Express)"],
+        [
+            "Java (Spring Boot)",
+            "Python (FastAPI)",
+            "C# (.NET)",
+            "Node.js (Express)",
+            "Groovy (for JCL)",   # NEW OPTION
+        ],
     )
     extras = st.multiselect(
         "Artifacts to include",
@@ -43,14 +50,15 @@ with st.sidebar:
     st.divider()
     st.caption(key_hint)
     if missing:
-        st.warning("No API key detected for the selected provider. Set it in your environment or Streamlit secrets.")
+        st.warning("⚠️ No API key detected for the selected provider.")
 
+# ---------------- Upload + Prompt ----------------
 st.write("### 1) Upload legacy file")
 uploaded = st.file_uploader("Supported: .cbl, .cob, .jcl, .txt", type=["cbl", "cob", "jcl", "txt"])
 
 st.write("### 2) Modernization instructions")
 default_prompt = (
-    "Convert to clean, production-ready code using the selected stack. "
+    "Convert to production-ready code using the selected stack. "
     "Preserve business logic, remove dead code, and use best practices. "
     "If data structures are implicit, make them explicit. Provide comments where intent is unclear."
 )
@@ -58,6 +66,7 @@ user_prompt = st.text_area("Prompt", value=default_prompt, height=140)
 
 run = st.button("🛠️ Generate Modernization Bundle", type="primary", use_container_width=True)
 
+# ---------------- Execution ----------------
 if run:
     if not uploaded:
         st.error("Please upload a legacy file.")
@@ -87,7 +96,7 @@ if run:
             model=model,
             temperature=float(temperature),
             max_tokens=int(max_tokens),
-            provider=provider,  # NEW
+            provider=provider,
         )
     except Exception as e:
         st.error(f"Conversion failed: {e}")
@@ -95,18 +104,14 @@ if run:
 
     st.success("✅ Bundle ready!")
 
-    # bundle format:
-    # {
-    #   "files": [{"path": "src/Main.java", "content": "…"}, ...],
-    #   "notes_markdown": "…",
-    #   "usage": {"provider": "...", "model": "...", ...}
-    # }
-
     files: List[Dict[str, str]] = bundle.get("files", [])
     notes = bundle.get("notes_markdown", "")
     usage = bundle.get("usage", {})
 
-    tab_files, tab_notes, tab_usage = st.tabs(["📦 Files", "📝 Notes", "📊 Usage"])
+    # ---------------- Tabs ----------------
+    tab_files, tab_diff, tab_notes, tab_usage, tab_chat = st.tabs(
+        ["📦 Files", "🆚 Comparison", "📝 Notes", "📊 Usage", "💬 Chatbot"]
+    )
 
     def _guess_lang(path: str) -> str:
         p = path.lower()
@@ -117,11 +122,13 @@ if run:
             "py": "python",
             "cs": "csharp",
             "js": "javascript", "mjs": "javascript", "cjs": "javascript",
+            "groovy": "groovy",
             "yml": "yaml", "yaml": "yaml",
             "json": "json",
             "md": "md",
         }.get(ext, "text")
 
+    # ---------- Files ----------
     with tab_files:
         if not files:
             st.info("No files returned.")
@@ -143,13 +150,51 @@ if run:
             mem.seek(0)
             st.download_button("⬇️ Download ZIP", data=mem, file_name="modernization_bundle.zip", mime="application/zip")
 
+    # ---------- Comparison ----------
+    with tab_diff:
+        st.write("#### Legacy vs Modernized")
+        if files:
+            modern_code = "\n".join(f.get("content", "") for f in files)
+            diff = difflib.HtmlDiff().make_table(
+                legacy_text.splitlines(), modern_code.splitlines(),
+                fromdesc="Legacy", todesc="Modernized", context=True, numlines=5
+            )
+            st.components.v1.html(diff, height=600, scrolling=True)
+        else:
+            st.info("Generate a bundle to see comparison.")
+
+    # ---------- Notes ----------
     with tab_notes:
         if notes:
             st.markdown(notes)
         else:
             st.info("No notes were returned. Enable **Migration Notes** in the sidebar.")
 
+    # ---------- Usage ----------
     with tab_usage:
         st.write("Token/provider usage reported by the API (if available).")
-        st.json(usage or {"info": "No usage available from provider"})
+        st.json(usage or {"info": "No usage available"})
 
+    # ---------- Chatbot ----------
+    with tab_chat:
+        st.write("#### Ask questions about your code/migration")
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+
+        for role, msg in st.session_state.chat_history:
+            with st.chat_message(role):
+                st.markdown(msg)
+
+        if prompt := st.chat_input("Ask me anything about modernization…"):
+            st.session_state.chat_history.append(("user", prompt))
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                try:
+                    # Here you would call your LLM backend
+                    answer = f"(Demo) Answer from {provider} {model}: This will explain `{prompt}`"
+                except Exception as e:
+                    answer = f"Error: {e}"
+                st.markdown(answer)
+                st.session_state.chat_history.append(("assistant", answer))
