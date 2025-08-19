@@ -1,9 +1,8 @@
-# converter.py
 import os
 import json
 from typing import Dict, List, Any
 
-# OpenAI SDK (modern)
+# OpenAI SDK
 try:
     from openai import OpenAI
 except Exception:
@@ -20,8 +19,9 @@ SYSTEM_PROMPT = """
 You are an expert in Mainframe Modernization.
 
 Special Rules:
-- If legacy type is JCL => ALWAYS convert to shell scripts (bash) or CI/CD YAML,
-  even if target stack is Spring Boot, FastAPI, etc.
+- If legacy type is JCL:
+   * By default => convert to Shell scripts (bash) or CI/CD YAML.
+   * If target stack contains 'groovy' => convert to Groovy (Jenkins pipeline style).
 - COBOL => convert into the requested target stack (Spring/Java, FastAPI/Python, etc.)
 - DB2 => modern SQL/ORM
 - VSAM => relational/NoSQL schema + data access code
@@ -53,7 +53,9 @@ def _stack_defaults(target_stack: str) -> Dict[str, str]:
         return {"main": "src/Program.cs", "test_dir": "tests"}
     if "node" in ts or "express" in ts:
         return {"main": "src/index.js", "test_dir": "__tests__"}
-    if "shell" in ts:  # For JCL → shell
+    if "groovy" in ts:  # JCL -> Groovy
+        return {"main": "jenkins/Jenkinsfile.groovy", "test_dir": "tests"}
+    if "shell" in ts:  # JCL -> shell
         return {"main": "scripts/job.sh", "test_dir": "tests"}
     return {"main": "src/output.txt", "test_dir": "tests"}
 
@@ -120,9 +122,12 @@ def convert_to_bundle(
     """
     legacy_type = _detect_legacy_type(legacy_code)
 
-    # Override if JCL
+    # Override JCL conversion defaults
     if legacy_type == "jcl":
-        target_stack = "Shell Script"
+        if "groovy" in target_stack.lower():
+            target_stack = "Groovy"
+        else:
+            target_stack = "Shell Script"
 
     defaults = _stack_defaults(target_stack)
 
@@ -163,7 +168,6 @@ def convert_to_bundle(
 
 
 # -------- Interactive Chatbot --------
-
 def chatbot(legacy_code: str, query: str, model: str, temperature: float = 0.2, max_tokens: int = 1000, provider: str = "OpenAI") -> str:
     """
     Interactive chatbot for modernization Q&A.
