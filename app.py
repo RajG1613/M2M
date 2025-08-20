@@ -215,6 +215,7 @@ with st.sidebar:
             "Node.js (Express)",
             "Groovy (for JCL)",   # JCL → Groovy pipelines
             "Shell (for JCL)",    # JCL → Shell scripts
+            "REST APIs",
         ],
     )
     extras = st.multiselect(
@@ -385,3 +386,4 @@ if run:
                     answer = f"Error: {e}"
                 st.markdown(answer)
                 st.session_state.chat_history.append(("assistant", answer))
+
