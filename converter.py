@@ -1,3 +1,4 @@
+# converter.py
 import os
 import json
 from typing import Dict, List, Any
@@ -22,13 +23,19 @@ Special Rules:
 - If legacy type is JCL:
    * By default => convert to Shell scripts (bash) or CI/CD YAML.
    * If target stack contains 'groovy' => convert to Groovy (Jenkins pipeline style).
-- COBOL => convert into the requested target stack (Spring/Java, FastAPI/Python, etc.)
-- DB2 => modern SQL/ORM
-- VSAM => relational/NoSQL schema + data access code
-- CICS => REST APIs (controller + service layer)
-- IMS DB => RDBMS schema + migration utilities
+- COBOL => convert into the requested target stack (Spring/Java, FastAPI/Python, .NET, Node).
+- DB2 => modern SQL/ORM.
+- VSAM => relational/NoSQL schema + data access code.
+- CICS => REST APIs (controller + service layer) in the chosen stack.
+- IMS DB => RDBMS schema + migration utilities.
 
-Respond STRICTLY as JSON with this schema:
+Formatting Rules:
+- Output must be well-formatted (line breaks, indentation). NO single-line blobs.
+- Keep code blocks idiomatic for the chosen stack (imports, package structure, basic project layout).
+- Keep unit tests in a conventional test folder for the target stack.
+- For JCL, convert steps & DDs to scripts/pipelines with clear comments for dataset inputs/outputs.
+
+Respond STRICTLY as JSON **only** with this schema:
 {
   "files": [
     {"path": "relative/path/with/extension", "content": "file text"},
@@ -46,7 +53,7 @@ Respond STRICTLY as JSON with this schema:
 def _stack_defaults(target_stack: str) -> Dict[str, str]:
     ts = target_stack.lower()
     if "spring" in ts:  # Java/Spring Boot
-        return {"main": "src/main/java/App.java", "test_dir": "src/test/java"}
+        return {"main": "src/main/java/com/example/App.java", "test_dir": "src/test/java/com/example"}
     if "fastapi" in ts:  # Python
         return {"main": "app/main.py", "test_dir": "tests"}
     if ".net" in ts or "c#" in ts:
@@ -116,6 +123,7 @@ def convert_to_bundle(
     temperature: float,
     max_tokens: int,
     provider: str = "OpenAI",
+    extra_context: Dict[str, Any] = None,  # NEW
 ) -> Dict[str, Any]:
     """
     Convert legacy code into modern artifacts.
@@ -126,7 +134,10 @@ def convert_to_bundle(
     if legacy_type == "jcl":
         if "groovy" in target_stack.lower():
             target_stack = "Groovy"
+        elif "shell" in target_stack.lower():
+            target_stack = "Shell Script"
         else:
+            # default JCL path → Shell
             target_stack = "Shell Script"
 
     defaults = _stack_defaults(target_stack)
@@ -139,6 +150,10 @@ def convert_to_bundle(
         "legacy_type": legacy_type,
         "defaults": defaults,
     }
+
+    # Pass through helpful context (uploaded file names, missing refs) if provided
+    if extra_context:
+        user_payload["context"] = extra_context
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -155,6 +170,7 @@ def convert_to_bundle(
         if "files" not in bundle:
             raise ValueError("No 'files' in JSON")
     except Exception:
+        # Fallback: deliver single main file with whatever the model returned (already formatted by UI)
         bundle = {
             "files": [{"path": defaults["main"], "content": content}],
             "notes_markdown": "⚠️ Model did not return JSON. Wrapped raw output.",
@@ -168,15 +184,22 @@ def convert_to_bundle(
 
 
 # -------- Interactive Chatbot --------
-def chatbot(legacy_code: str, query: str, model: str, temperature: float = 0.2, max_tokens: int = 1000, provider: str = "OpenAI") -> str:
+def chatbot(
+    legacy_code: str,
+    query: str,
+    model: str,
+    temperature: float = 0.2,
+    max_tokens: int = 1000,
+    provider: str = "OpenAI"
+) -> str:
     """
     Interactive chatbot for modernization Q&A.
-    Example: explain COBOL logic, map DB2 to ORM, etc.
+    Example: explain COBOL logic, map DB2/VSAM/IMS to modern stores, JCL step mapping, etc.
     """
     legacy_type = _detect_legacy_type(legacy_code)
     messages = [
         {"role": "system", "content": f"You are a modernization assistant. Legacy type = {legacy_type}."},
-        {"role": "user", "content": f"Legacy code:\n{legacy_code}\n\nUser question:\n{query}"}
+        {"role": "user", "content": f"Legacy code (combined):\n{legacy_code}\n\nUser question:\n{query}\n\nPlease answer clearly and concisely."}
     ]
 
     if provider.lower() == "groq":
