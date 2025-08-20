@@ -23,7 +23,7 @@ You are an expert in Mainframe Modernization.
 Special Rules:
 - If legacy type is JCL:
    * By default => convert to Shell scripts (bash) or Groovy .
-   * If target stack contains 'groovy' => convert to Groovy (Jenkins pipeline style).
+   * If target stack contains 'groovy' => convert to Groovy .
 - COBOL => convert into the requested target stack (Spring/Java, FastAPI/Python, .NET, Node).
 - COPYBOOK => convert into DTO/POJO classes, schema files, or reusable modules in the target stack.
 - DB2 => modern SQL/ORM.
@@ -31,23 +31,23 @@ Special Rules:
 - CICS => REST APIs (controller + service layer) in the chosen stack.
 - IMS DB => RDBMS schema + migration utilities.
 
+- COBOL => convert into the requested target stack (Spring/Java, FastAPI/Python, .NET, Node).
+- DB2 => modern SQL/ORM.
+- VSAM => relational/NoSQL schema + data access code.
+- CICS => REST APIs (controller + service layer) in the chosen stack.
+- IMS DB => RDBMS schema + migration utilities.
+
 Formatting Rules:
 - Output must be well-formatted (line breaks, indentation).
-- Keep idiomatic conventions for the chosen stack.
-- Each COBOL program, JCL member, and Copybook should map to a separate output file.
+- Provide multiple files with clear separators if needed.
+- Use the following delimiter when multiple files are returned:
 
-Respond STRICTLY as JSON **only** with this schema and Output must be well-formatted (line breaks, indentation):
-{
-  "files": [
-    {"path": "relative/path/with/extension", "content": "file text"},
-    ...
-  ],
-  "notes_markdown": "bullet points of migration decisions, risks, assumptions",
-  "usage": {
-    "notes": "optional",
-    "hints": "optional"
-  }
-}
+===== FILE: relative/path/with/extension =====
+<file content here>
+
+- After listing files, add a section:
+===== NOTES =====
+- bullet points of migration decisions, risks, assumptions
 """
 
 
@@ -147,7 +147,7 @@ def convert_to_bundle(
     extra_context: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     """
-    Convert legacy code into modern artifacts with chunking and multi-file support.
+    Convert legacy code into modern artifacts .
     """
     legacy_type = _detect_legacy_type(legacy_code)
 
@@ -227,4 +227,5 @@ def chatbot(
         return _call_groq(messages, model, temperature, max_tokens)
     else:
         return _call_openai(messages, model, temperature, max_tokens)
+
 
