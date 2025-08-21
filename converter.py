@@ -76,7 +76,7 @@ def _stack_defaults(target_stack: str) -> Dict[str, str]:
     if "node" in ts or "express" in ts:
         return {"main": "src/index.js", "test_dir": "_tests_"}
     if "groovy" in ts:  # JCL -> Groovy
-        return {"main": "jenkins/Jenkinsfile.groovy", "test_dir": "tests"}
+        return {"main": "File.groovy", "test_dir": "tests"}
     if "shell" in ts:  # JCL -> shell
         return {"main": "scripts/job.sh", "test_dir": "tests"}
     return {"main": "src/output.txt", "test_dir": "tests"}
@@ -305,7 +305,7 @@ def chatbot(
     model: str,
     temperature: float = 0.2,
     max_tokens: int = 1000,
-    provider: str = "OpenAI"
+    provider: str = "Groq"
 ) -> str:
     """
     Interactive chatbot for modernization Q&A.
