@@ -1,22 +1,192 @@
 # app.py
 import io
 import os
+import re
+import time
 import difflib
 import zipfile
-from pathlib import Path
+import textwrap
+import json
+import xml.dom.minidom as minidom
 from typing import List, Dict, Tuple
 
 import streamlit as st
-from converter import convert_to_bundle, chatbot, detect_legacy_type
+from converter import convert_to_bundle, chatbot
 from parser import parse_code
 
-# ---------------- Page ----------------
+# ---------- Streamlit page ----------
 st.set_page_config(page_title="AI Mainframe Modernizer", page_icon="🚀", layout="wide")
+
 st.title("🚀 AI Mainframe Modernizer — Enterprise Demo")
-st.caption(
-    "Upload COBOL/JCL/Copybooks/Control Cards (files or zipped folders) → "
-    "get modern artifacts: code, tests, API spec, CI pipeline, Dockerfile & migration notes."
-)
+st.caption("Upload COBOL/JCL (single, multiple, or ZIP) → get modern artifacts: code, tests, API spec, CI pipeline, Dockerfile & migration notes.")
+
+# ---------- Helpers ----------
+def _read_uploads(files: List[st.runtime.uploaded_file_manager.UploadedFile]) -> Dict[str, str]:
+    """
+    Returns {relative_path: text_content}. Supports plain files and a single .zip.
+    """
+    result: Dict[str, str] = {}
+    if not files:
+        return result
+
+    # If user sent a single ZIP, expand it
+    if len(files) == 1 and files[0].name.lower().endswith(".zip"):
+        data = files[0].getvalue()
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for zinfo in zf.infolist():
+                if zinfo.is_dir():
+                    continue
+                name = zinfo.filename
+                # Only read smallish text-like files; skip binaries
+                try:
+                    text = zf.read(zinfo).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                result[name] = text
+        return result
+
+    # Otherwise treat as multiple individual files
+    for f in files:
+        try:
+            result[f.name] = f.getvalue().decode("utf-8", errors="replace")
+        except Exception:
+            # ignore non-decodable files
+            pass
+    return result
+
+
+def _combined_legacy(files_map: Dict[str, str]) -> str:
+    """
+    Build a single text block that keeps per-file boundaries for model context & diff.
+    """
+    parts = []
+    for path, txt in files_map.items():
+        parts.append(f"\n===== BEGIN FILE: {path} =====\n{txt}\n===== END FILE: {path} =====\n")
+    return "\n".join(parts).strip()
+
+
+def _detect_missing_refs(files_map: Dict[str, str]) -> Dict[str, List[str]]:
+    """
+    Very lightweight detection of likely missing include/control card references:
+    - COBOL: COPY <name>
+    - JCL: //SYSIN DD *, INCLUDE, or //DD statements referencing external DSNs
+    Returns: {"copybooks": [...], "includes": [...], "ddnames": [...]} (values possibly empty)
+    """
+    uploaded_names = set([os.path.splitext(os.path.basename(p))[0].upper() for p in files_map.keys()])
+
+    copybooks, includes, ddnames = set(), set(), set()
+
+    cobol_copy_re = re.compile(r"\bCOPY\s+([A-Z0-9_#\-]+)", re.IGNORECASE)
+    jcl_include_re = re.compile(r"\bINCLUDE\s+([A-Z0-9_#\-/\.]+)", re.IGNORECASE)
+    jcl_dd_re = re.compile(r"^\s*//([A-Z0-9$#@]+)\s+DD\b.*", re.IGNORECASE | re.MULTILINE)
+
+    for path, txt in files_map.items():
+        up = txt.upper()
+
+        # COBOL COPY
+        for m in cobol_copy_re.findall(up):
+            copybooks.add(m.upper())
+
+        # JCL INCLUDE (often used to pull control statements)
+        for m in jcl_include_re.findall(up):
+            includes.add(m.upper())
+
+        # JCL DD names – we just list them; resolving DSN/HLQ is site specific
+        for m in jcl_dd_re.findall(up):
+            ddnames.add(m.upper())
+
+    # Treat a COPY <X> as "present" if any uploaded file’s stem name matches X
+    missing_copybooks = [c for c in sorted(copybooks) if c not in uploaded_names]
+    # Includes are often members; we cannot verify well, but still report
+    missing_includes = sorted(includes)
+
+    return {
+        "copybooks": missing_copybooks,
+        "includes": missing_includes,
+        "ddnames": sorted(ddnames),
+    }
+
+
+def _guess_lang(path: str) -> str:
+    p = path.lower()
+    if "dockerfile" in p:
+        return "docker"
+    ext = os.path.splitext(p)[1].lstrip(".")
+    return {
+        "java": "java", "xml": "xml",
+        "py": "python",
+        "cs": "csharp",
+        "js": "javascript", "mjs": "javascript", "cjs": "javascript",
+        "groovy": "groovy",
+        "yml": "yaml", "yaml": "yaml",
+        "json": "json",
+        "md": "md",
+        "sh": "bash",
+        "bat": "bat",
+    }.get(ext, "text")
+
+
+def _format_content_auto(path: str, content: str) -> str:
+    """
+    Safe, dependency-free pretty printing & de-minifying so you don’t get one-line blobs.
+    Not perfect like real formatters, but much better for demos.
+    """
+    lang = _guess_lang(path)
+    text = content or ""
+
+    # Quick fixes first
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # JSON
+    if lang == "json":
+        try:
+            return json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+        except Exception:
+            return text
+
+    # XML
+    if lang == "xml":
+        try:
+            dom = minidom.parseString(text.encode("utf-8"))
+            return dom.toprettyxml(indent="  ")
+        except Exception:
+            return text
+
+    # YAML: avoid adding PyYAML dependency; lightly indent blocks
+    if lang == "yaml":
+        # heuristic: ensure there’s a newline after colons when needed
+        fixed = re.sub(r":(\S)", r": \1", text)
+        return fixed
+
+    # Bash/Groovy/Java/C#/JS: basic brace indentation
+    if lang in {"groovy", "java", "csharp", "javascript"}:
+        indent = 0
+        out_lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.endswith("}") or stripped.startswith("}"):
+                indent = max(0, indent - 1)
+            out_lines.append(("  " * indent) + stripped)
+            if stripped.endswith("{") and not stripped.endswith("{}"):
+                indent += 1
+        return "\n".join(out_lines)
+
+    # Python: add newlines around def/class and indent blocks heuristically
+    if lang == "python":
+        # add newline after colon that starts a block if missing
+        return "\n".join(textwrap.dedent(text).splitlines())
+
+    # Default: collapse multiple blank lines and trim
+    text = re.sub(r"\n{3,}", "\n\n", text).strip("\n") + "\n"
+    return text
+
+
+def _limit_hint():
+    st.info(
+        "📦 To allow up to **1GB** uploads, create `.streamlit/config.toml` in your repo with:\n\n"
+        "```\n[server]\nmaxUploadSize = 1000\n```\n"
+        "On some hosts you may also need to raise proxy limits."
+    )
 
 # ---------------- Sidebar ----------------
 with st.sidebar:
@@ -25,12 +195,12 @@ with st.sidebar:
 
     if provider == "OpenAI":
         model = st.selectbox("Model", ["gpt-4o", "gpt-4o-mini"])
-        key_hint = "🔐 Reads OpenAI key from env var *MY_NEW_APP_KEY*"
-        missing_key = not os.getenv("MY_NEW_APP_KEY")
+        key_hint = "🔐 Reads OpenAI key from env var **MY_NEW_APP_KEY**"
+        missing = not os.getenv("MY_NEW_APP_KEY")
     else:
         model = st.selectbox("Model", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
-        key_hint = "🔐 Reads Groq key from env var *GROQ_API_KEY*"
-        missing_key = not os.getenv("GROQ_API_KEY")
+        key_hint = "🔐 Reads Groq key from env var **GROQ_API_KEY**"
+        missing = not os.getenv("GROQ_API_KEY")
 
     temperature = st.slider("Creativity (temperature)", 0.0, 1.0, 0.2, 0.05)
     max_tokens = st.number_input("Max output tokens", min_value=512, max_value=8192, value=4096, step=256)
@@ -38,240 +208,154 @@ with st.sidebar:
     st.divider()
     target_stack = st.selectbox(
         "Target stack",
-        ["Java (Spring Boot)", "Python (FastAPI)", "C# (.NET)", "Node.js (Express)", "Groovy (for JCL)"],
+        [
+            "Java (Spring Boot)",
+            "Python (FastAPI)",
+            "C# (.NET)",
+            "Node.js (Express)",
+            "Groovy (for JCL)",   # JCL → Groovy pipelines
+            "Shell (for JCL)",    # JCL → Shell scripts
+            "REST APIs",
+        ],
     )
     extras = st.multiselect(
         "Artifacts to include",
         ["Unit Tests", "OpenAPI Spec", "CI Pipeline (YAML)", "Dockerfile", "K8s Manifests", "Migration Notes"],
-        default=["Unit Tests", "OpenAPI Spec", "CI Pipeline (YAML)", "Dockerfile", "Migration Notes"],
+        default=["Unit Tests", "OpenAPI Spec", "CI Pipeline (YAML)", "Dockerfile", "Migration Notes"]
     )
+    st.divider()
+    _limit_hint()
     st.caption(key_hint)
-    if missing_key:
+    if missing:
         st.warning("⚠️ No API key detected for the selected provider.")
 
 # ---------------- Upload + Prompt ----------------
-st.write("### 1) Upload files or a ZIP folder")
-# Accept any file; we’ll filter to text/zip in code so extensionless files are supported
+st.write("### 1) Upload legacy files (one, many, or a ZIP folder)")
 uploads = st.file_uploader(
-    "Supported: .cbl, .cob, .cpy, .jcl, .txt, .zip (files without extension are also accepted)",
-    type=None,
-    accept_multiple_files=True,
+    "Supported: .cbl, .cob, .jcl, .txt, .zip",
+    type=["cbl", "cob", "jcl", "txt", "zip"],
+    accept_multiple_files=True
 )
 
 st.write("### 2) Modernization instructions")
 default_prompt = (
     "Convert to production-ready code using the selected stack. "
     "Preserve business logic, remove dead code, and use best practices. "
-    'If data structures are implicit, make them explicit. Provide comments where intent is unclear.'
+    "Map DB2/VSAM/IMS to modern data stores. Convert CICS to REST APIs. "
+    "For JCL, convert to Shell or Groovy pipelines as appropriate. "
+    "If data structures are implicit, make them explicit. Add comments where intent is unclear."
 )
 user_prompt = st.text_area("Prompt", value=default_prompt, height=140)
 
 run = st.button("🛠️ Generate Modernization Bundle", type="primary", use_container_width=True)
 
-# ---------------- Helpers ----------------
-TEXT_LANG_BY_EXT = {
-    "java": "java", "xml": "xml",
-    "py": "python",
-    "cs": "csharp",
-    "js": "javascript", "mjs": "javascript", "cjs": "javascript",
-    "groovy": "groovy",
-    "yml": "yaml", "yaml": "yaml",
-    "json": "json",
-    "md": "md",
-    "sh": "bash",
-}
-def _guess_lang(path: str) -> str:
-    p = path.lower()
-    if "dockerfile" in p:
-        return "docker"
-    return TEXT_LANG_BY_EXT.get(Path(p).suffix.lstrip("."), "text")
-
-def _looks_binary(data: bytes) -> bool:
-    # Heuristic: contains NUL or very high non-text ratio
-    if b"\x00" in data:
-        return True
-    # treat small files as text
-    if len(data) < 4:
-        return False
-    # rough ratio of non-printables
-    sample = data[:4096]
-    nonprint = sum(1 for b in sample if b < 9 or (13 < b < 32) or b == 127)
-    return (nonprint / max(1, len(sample))) > 0.30
-
-def _read_zip(file) -> List[Tuple[str, str]]:
-    """Return list of (relpath, text) from a zip; includes files with no extension too; skips binary."""
-    out: List[Tuple[str, str]] = []
-    try:
-        with zipfile.ZipFile(io.BytesIO(file.getvalue()), "r") as zf:
-            # basic guard (avoid huge zips with thousands of files on small instances)
-            for i, info in enumerate(zf.infolist()):
-                if i > 2000:
-                    st.warning("ZIP contains more than 2000 files; extra files were skipped.")
-                    break
-                if info.is_dir():
-                    continue
-                raw = zf.read(info.filename)
-                if _looks_binary(raw):
-                    continue
-                try:
-                    text = raw.decode("utf-8", errors="replace")
-                except Exception:
-                    continue
-                out.append((info.filename, text))
-    except zipfile.BadZipFile:
-        st.error(f"Invalid ZIP file: {getattr(file, 'name', 'uploaded.zip')}")
-    return out
-
-def _read_uploads(files) -> List[Tuple[str, str]]:
-    """Return a flat list of (name, text) from uploaded files and zips; skips binary."""
-    sources: List[Tuple[str, str]] = []
-    for f in files or []:
-        name = f.name or "uploaded"
-        if name.lower().endswith(".zip"):
-            sources.extend(_read_zip(f))
-            continue
-        raw = f.getvalue()
-        if _looks_binary(raw):
-            # silently skip binaries (images, pdfs, etc.)
-            continue
-        try:
-            text = raw.decode("utf-8", errors="replace")
-        except Exception:
-            continue
-        sources.append((name, text))
-    return sources
-
 # ---------------- Execution ----------------
 if run:
-    if not uploads:
+    files_map = _read_uploads(uploads)
+    if not files_map:
         st.error("Please upload at least one file (or a ZIP).")
         st.stop()
     if not user_prompt.strip():
         st.error("Please enter your instructions.")
         st.stop()
 
-    sources = _read_uploads(uploads)
-    if not sources:
-        st.error("No readable text files found in the upload.")
+    combined_legacy = _combined_legacy(files_map)
+    missing_refs = _detect_missing_refs(files_map)
+
+    with st.status("Parsing legacy code…", expanded=False) as s:
+        # If you have a smarter parser, you can feed each file; here we collapse for the prompt.
+        structured = parse_code(combined_legacy, file_name="MULTI")
+        time.sleep(0.2)
+        s.update(label="Calling the model…")
+
+    try:
+        bundle = convert_to_bundle(
+            legacy_code=structured,
+            target_stack=target_stack,
+            instructions=user_prompt,
+            requested_artifacts=extras,
+            model=model,
+            temperature=float(temperature),
+            max_tokens=int(max_tokens),
+            provider=provider,
+            extra_context={
+                "uploaded_files": list(files_map.keys()),
+                "missing_references": missing_refs,
+            },
+        )
+    except Exception as e:
+        st.error(f"Conversion failed: {e}")
         st.stop()
 
-    all_files: List[Dict[str, str]] = []
-    all_notes: List[str] = []
-    usage_merged: Dict[str, str] = {}
-    missing_refs: List[str] = []
+    st.success("✅ Bundle ready!")
 
-    with st.status("Converting…", expanded=False) as s:
-        for idx, (fname, content) in enumerate(sources, start=1):
-            s.update(label=f"Parsing {fname} ({idx}/{len(sources)})")
-            structured = parse_code(content, file_name=fname)
-
-            # detect legacy type (works for .txt or no extension)
-            ltype = detect_legacy_type(structured)
-
-            # basic missing reference heuristics
-            up = structured.upper()
-            if ltype == "cobol" and "COPY " in up:
-                missing_refs.append(f"{fname}: contains COPY statements — ensure copybooks are uploaded.")
-            if ltype == "jcl" and " DD " in f" {up} " and "DSN=" in up:
-                missing_refs.append(f"{fname}: references datasets — verify control cards/inputs are present.")
-
-            s.update(label=f"Calling model for {fname}…")
-            try:
-                bundle = convert_to_bundle(
-                    legacy_code=structured,
-                    target_stack=target_stack,
-                    instructions=user_prompt,
-                    requested_artifacts=extras,
-                    model=model,
-                    temperature=float(temperature),
-                    max_tokens=int(max_tokens),
-                    provider=provider,
-                    extra_context={"source_filename": fname, "detected_type": ltype},
-                )
-            except Exception as e:
-                st.error(f"Conversion failed for {fname}: {e}")
-                continue
-
-            all_files.extend(bundle.get("files", []))
-            if bundle.get("notes_markdown"):
-                all_notes.append(f"### Notes for *{fname}*\n" + bundle["notes_markdown"])
-            usage_merged = {**usage_merged, **bundle.get("usage", {})}
-
-    st.success("✅ Conversion complete")
+    files: List[Dict[str, str]] = bundle.get("files", [])
+    notes = bundle.get("notes_markdown", "")
+    usage = bundle.get("usage", {})
 
     # ---------------- Tabs ----------------
-    tab_files, tab_diff, tab_notes, tab_usage, tab_chat = st.tabs(
-        ["📦 Files", "🆚 Comparison", "📝 Notes", "📊 Usage", "💬 Chatbot"]
+    tab_files, tab_diff, tab_missing, tab_notes, tab_usage, tab_chat = st.tabs(
+        ["📦 Files", "🆚 Comparison", "❗ Missing", "📝 Notes", "📊 Usage", "💬 Chatbot"]
     )
 
     # ---------- Files ----------
     with tab_files:
-        if not all_files:
+        if not files:
             st.info("No files returned.")
         else:
             st.write("#### Generated files")
-            for f in all_files:
+            formatted_files: List[Tuple[str, str]] = []
+            for f in files:
                 path = f.get("path", "output.txt")
                 content = f.get("content", "")
+                pretty = _format_content_auto(path, content)
+                formatted_files.append((path, pretty))
                 with st.expander(path, expanded=True):
-                    st.code(content, language=_guess_lang(path))
+                    st.code(pretty, language=_guess_lang(path))
 
-            # Build ZIP in-memory
+            # ZIP download
             mem = io.BytesIO()
             with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
-                for f in all_files:
-                    zf.writestr(f.get("path", "output.txt"), f.get("content", ""))
-                if all_notes:
-                    zf.writestr("MIGRATION_NOTES.md", "\n\n---\n\n".join(all_notes))
-                if missing_refs:
-                    zf.writestr("MISSING_REFERENCES.md", "\n".join(f"- {m}" for m in missing_refs))
+                for path, pretty in formatted_files:
+                    zf.writestr(path, pretty)
+                if notes:
+                    zf.writestr("MIGRATION_NOTES.md", notes)
             mem.seek(0)
-            st.download_button(
-                "⬇️ Download ZIP",
-                data=mem,
-                file_name="modernization_bundle.zip",
-                mime="application/zip",
-            )
+            st.download_button("⬇️ Download ZIP", data=mem, file_name="modernization_bundle.zip", mime="application/zip")
 
     # ---------- Comparison ----------
     with tab_diff:
-        st.write("#### Legacy vs Modernized (choose a modern file)")
-        if not all_files:
-            st.info("Generate a bundle to see comparison.")
-        else:
-            modern_paths = [f["path"] for f in all_files]
-            chosen = st.selectbox("Modernized file", modern_paths)
-            modern_content = next((f["content"] for f in all_files if f["path"] == chosen), "")
-
-            # try to pick a matching legacy source by basename; fallback to first file
-            base = Path(chosen).stem.lower()
-            legacy_pick = ""
-            for name, text in sources:
-                if Path(name).stem.lower() == base:
-                    legacy_pick = text
-                    break
-            if not legacy_pick and sources:
-                legacy_pick = sources[0][1]
-
-            diff_html = difflib.HtmlDiff().make_table(
-                legacy_pick.splitlines(), modern_content.splitlines(),
-                fromdesc="Legacy", todesc=chosen, context=True, numlines=5
+        st.write("#### Legacy vs Modernized")
+        if files:
+            modern_code = "\n".join(_format_content_auto(f.get("path", ""), f.get("content", "")) for f in files)
+            diff = difflib.HtmlDiff().make_table(
+                combined_legacy.splitlines(), modern_code.splitlines(),
+                fromdesc="Legacy (combined)", todesc="Modernized (combined)", context=True, numlines=5
             )
-            st.components.v1.html(diff_html, height=600, scrolling=True)
+            st.components.v1.html(diff, height=600, scrolling=True)
+        else:
+            st.info("Generate a bundle to see comparison.")
+
+    # ---------- Missing ----------
+    with tab_missing:
+        st.write("#### Detected references")
+        st.json(missing_refs)
+        if missing_refs.get("copybooks") or missing_refs.get("includes"):
+            st.warning(
+                "The conversion can proceed, but results may be partial/approximate if copybooks or includes are missing."
+            )
 
     # ---------- Notes ----------
     with tab_notes:
-        if all_notes:
-            st.markdown("\n\n---\n\n".join(all_notes))
+        if notes:
+            st.markdown(notes)
         else:
-            st.info("No notes were returned. Enable *Migration Notes* in the sidebar.")
-        if missing_refs:
-            st.warning("*Missing/Dependent Inputs Detected:*\n\n" + "\n".join(f"- {m}" for m in missing_refs))
+            st.info("No notes were returned. Enable **Migration Notes** in the sidebar.")
 
     # ---------- Usage ----------
     with tab_usage:
-        st.write("Token/provider usage (if available).")
-        st.json(usage_merged or {"info": "No usage available"})
+        st.write("Token/provider usage reported by the API (if available).")
+        st.json(usage or {"info": "No usage available"})
 
     # ---------- Chatbot ----------
     with tab_chat:
@@ -283,22 +367,23 @@ if run:
             with st.chat_message(role):
                 st.markdown(msg)
 
-        if prompt_q := st.chat_input("Ask me anything about modernization…"):
-            st.session_state.chat_history.append(("user", prompt_q))
+        if prompt := st.chat_input("Ask me anything about modernization…"):
+            st.session_state.chat_history.append(("user", prompt))
             with st.chat_message("user"):
-                st.markdown(prompt_q)
+                st.markdown(prompt)
 
-            legacy_all = "\n\n---\n\n".join(text for _, text in sources)
             with st.chat_message("assistant"):
                 try:
                     answer = chatbot(
-                        legacy_code=legacy_all,
-                        query=prompt_q,
+                        legacy_code=combined_legacy,
+                        query=prompt,
                         model=model,
                         temperature=float(temperature),
+                        max_tokens=1200,
                         provider=provider,
                     )
                 except Exception as e:
                     answer = f"Error: {e}"
                 st.markdown(answer)
                 st.session_state.chat_history.append(("assistant", answer))
+
