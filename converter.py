@@ -22,8 +22,8 @@ You are an expert in Mainframe Modernization.
 
 Special Rules:
 - If legacy type is JCL:
-   * Default => convert to Shell scripts (bash) or CI/CD YAML that mirrors steps/DDs.
-   * If target stack contains 'groovy' => convert to Groovy (Jenkins pipeline style).
+   * Default => convert to Shell scripts (bash) with correct Identation code that mirrors steps/DDs.
+   * If target stack contains 'groovy' => convert to Groovy.
 - COBOL => convert into the requested target stack (Spring/Java, FastAPI/Python, .NET, Node).
 - DB2 => modern SQL/ORM.
 - VSAM => relational/NoSQL schema + data access code.
@@ -38,18 +38,10 @@ Formatting Rules (MUST FOLLOW):
 - Add concise comments where business logic is inferred.
 - For each file, return: {"path": "...", "content": "..."}.
 
-Respond *ONLY* with JSON matching this schema:
-{
-  "files": [
-    {"path": "relative/path/with/extension", "content": "file text"},
-    ...
-  ],
-  "notes_markdown": "bullet points of migration decisions, risks, assumptions",
-  "usage": {
-    "notes": "optional",
-    "hints": "optional"
-  }
-}
+Respond with the converted code ONLY, in the exact format of the target language. 
+Do not include explanations, markdown, or JSON. 
+Output should be clean and ready to save as a file. 
+If multiple files are required, provide each one separately.
 """
 
 
@@ -329,3 +321,4 @@ def chatbot(
         return _call_groq(messages, model, temperature, max_tokens)
     else:
         return _call_openai(messages, model, temperature, max_tokens)
+
