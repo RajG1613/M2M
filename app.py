@@ -12,7 +12,7 @@ from converter import convert_to_bundle, chatbot, detect_legacy_type  # NOTE: ne
 from parser import parse_code
 
 # --- raise upload limit to 1GB ---
-$ ---st.set_option("server.maxUploadSize", 1000)   ###
+#-st.set_option("server.maxUploadSize", 1000)   ###
 
 st.set_page_config(page_title="AI Mainframe Modernizer", page_icon="🚀", layout="wide")
 
@@ -279,4 +279,3 @@ if run:
                     answer = f"Error: {e}"
                 st.markdown(answer)
                 st.session_state.chat_history.append(("assistant", answer))
-
